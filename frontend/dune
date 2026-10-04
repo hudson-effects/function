@@ -1,5 +1,6 @@
 (library
  (name frontend)
+ (public_name function.frontend)
  (libraries apron))
 
 (ocamllex

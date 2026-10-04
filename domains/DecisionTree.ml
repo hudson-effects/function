@@ -32,7 +32,7 @@ let retrybwd = ref 5
     It is parameterized by an auxiliary abstract domain for linear constraints 
     C, and an auxiliary abstract domains for functions F, both parameterized by 
     an auxiliary numerical abstract domain B. *)
-module DecisionTree (F: FUNCTION) : RANKING_FUNCTION =
+module DecisionTree (F: FUNCTION) =
 struct
 
   module B = F.B	(* auxiliary numerical abstract domain *)

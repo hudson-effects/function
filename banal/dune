@@ -1,5 +1,6 @@
 (library
  (name banal)
+ (public_name function.banal)
  (libraries zarith utils apron frontend oUnit apron.boxMPQ apron.octMPQ
    apron.polkaMPQ)
  (foreign_stubs

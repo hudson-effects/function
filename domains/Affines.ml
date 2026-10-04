@@ -7,7 +7,7 @@ open Partition
 open Functions
 open Numerical
 
-module Affine (B : PARTITION) : FUNCTION = struct
+module Affine (B : PARTITION) = struct
   module B = B
 
   (**)

@@ -7,7 +7,7 @@ open Functions
 
 let max = ref 5
 
-module OrdinalValued (F : FUNCTION) : FUNCTION = struct
+module OrdinalValued (F : FUNCTION) = struct
   module B = F.B
 
   (**)
