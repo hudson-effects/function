@@ -27,6 +27,9 @@ module type CONSTRAINT = sig
 
   val negate : t -> t
   val evolve : Linexpr1.t -> Linexpr1.t ->  Linexpr1.t
+  (* the coefficients of the variables divided by their gcd (the constant
+     is left unchanged); unchanged unless they are all integers *)
+  val canonical : Linexpr1.t -> Linexpr1.t
   val expand : t -> t * t
   (* val widen : t -> t -> t (* widening *) *)
 
@@ -315,6 +318,39 @@ module Constraint : CONSTRAINT = struct
         with Exit -> () )
       e1 ;
     result
+
+  let canonical e =
+    let int_of_coeff = function
+      | Coeff.Scalar s -> (
+          let q =
+            match s with
+            | Scalar.Mpqf q -> q
+            | Scalar.Float f -> Mpqf.of_float f
+            | Scalar.Mpfrf f -> Mpfrf.to_mpqf f
+          in
+          if Mpzf.cmp_int (Mpqf.get_den q) 1 = 0 then
+            int_of_string_opt (Mpzf.to_string (Mpqf.get_num q))
+          else None )
+      | Coeff.Interval _ -> None
+    in
+    let rec gcd a b = if b = 0 then abs a else gcd b (a mod b) in
+    let g = ref 0 and integral = ref true in
+    Linexpr1.iter
+      (fun c _ ->
+        match int_of_coeff c with
+        | Some n -> g := gcd !g n
+        | None -> integral := false )
+      e ;
+    if (not !integral) || !g <= 1 then e
+    else
+      let r = Linexpr1.copy e in
+      Linexpr1.iter
+        (fun c v ->
+          match int_of_coeff c with
+          | Some n -> Linexpr1.set_coeff r v (Coeff.s_of_int (n / !g))
+          | None -> () )
+        e ;
+      r
 
   (* let widen c1 (* a_1x_1 + ... + a_nx_n >= a_n+1 *) c2 (* b_1x_1 + ... +
      b_nx_n >= b_n+1 *) = (* (b_1 - a_1)x_1 + ... + (b_n - a_n)x_n >=

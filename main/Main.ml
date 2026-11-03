@@ -184,6 +184,20 @@ let parse_args () =
         Iterator.evolvethr := int_of_string x;
         DecisionTree.evolvethr := int_of_string x;
         doit r
+    | "-evolvedepth" :: x :: r ->
+        (* how many levels up evolve pairs a node with its ancestors
+           (default 1; 0 = all) *)
+        DecisionTree.evolvedepth := int_of_string x ;
+        doit r
+    | "-evolvegrowth" :: x :: r ->
+        (* keep the evolved cuts only if they add at most this many nodes
+           to the tree (default 4; 0 = always) *)
+        DecisionTree.evolvegrowth := int_of_string x ;
+        doit r
+    | "-evolvemax" :: x :: r ->
+        (* at most this many new directions per widening (default 1; 0 = all) *)
+        DecisionTree.evolvemax := int_of_string x ;
+        doit r
     | "-tracebwd" :: r ->
         (* backward analysis trace *)
         Iterator.tracebwd := true ;

@@ -24,6 +24,16 @@ open Ordinals
 
 let evolve = ref false
 let evolvethr = ref 0 
+(* how many levels up [adjacent] pairs a node with its ancestors
+   (1: its parent only; 0: all of them, as in the report) *)
+let evolvedepth = ref 1
+(* at most this many new directions per widening (0: unbounded, as in
+   the report) *)
+let evolvemax = ref 1
+(* the evolved cuts are kept only if they add at most this many nodes to
+   the tree (0: always kept).  On SV-COMP (hudson, -term), the cuts that
+   bound new states add 1 to 5 nodes, those that lose bounds 8 to 12 *)
+let evolvegrowth = ref 4
 
 let tracebwd = ref false
 let retrybwd = ref 5
@@ -642,70 +652,130 @@ struct
     let ls1 = tree_labels t1 in
     let ls2 = tree_labels t2 in
     
+    (* Evolving rays (Courant, "Improving the precision of FuncTion",
+       Section 3.2).  [p = !evolvethr] is the evolve threshold: a
+       constraint is counted, and kept, when it occurs at least [p] times
+       (the report's [> p] is [-evolve (p+1)]).  Three restrictions of
+       the report's definitions, each off at [0]: [adjacent] pairs a
+       node with its ancestors at most [!evolvedepth] levels up, at most
+       [!evolvemax] new directions are inserted per widening, and they
+       are kept only if they add at most [!evolvegrowth] nodes (inserting
+       a cut copies it into every branch below it, so the trees otherwise
+       grow quickly).  All three only shrink what is added: the result stays within
+       [complete(constraints(t1))] (Lemma 2), so widening still
+       terminates, and cuts do not affect soundness *)
     let make_label c =
-			let nc = C.negate c in
-			if C.isLeq nc c then (c, nc) else (nc, c)
-		in
-    let module LMap = Map.Make(L) in
-    let evolve_map = ref LMap.empty in 
-
-    (* Compute evovled constraints*) 
-    let evolve_cns linexp =  
-      let c1 = Lincons1.make (Linexpr1.copy linexp) Lincons1.SUPEQ in
-			let c2 = Lincons1.make (Linexpr1.copy linexp) Lincons1.SUPEQ in
-			Lincons1.set_cst c1 (Coeff.Scalar (Scalar.of_int 0));
-			Lincons1.set_cst c2 (Coeff.Scalar (Scalar.of_int (-1)));
-			(make_label c1,  make_label c2)
-		in
-    let add_evolve linexp = 
-      let c1,c2 = evolve_cns linexp in 
-      let n1 = try LMap.find c1 !evolve_map with Not_found -> 0 in 
-      let n2 = try LMap.find c2 !evolve_map with Not_found -> 0 in 
-      evolve_map := LMap.add (c1) (n1+ 1) !evolve_map;
-      evolve_map := LMap.add (c2) (n2+ 1) !evolve_map;
-      
+      let nc = C.negate c in
+      if C.isLeq nc c then (c, nc) else (nc, c)
     in
-    let rec evolve_all t cs =
-			match t with
-			| Bot | Leaf _ -> ()
-			| Node ((c, nc), l, r) ->
-				List.iter (fun c1 ->
-					add_evolve (C.evolve (C.linexpr c) (C.linexpr c1));
-					add_evolve (C.evolve (C.linexpr nc) (C.linexpr c1));
-					add_evolve (C.evolve (C.linexpr c1) (C.linexpr c));
-					add_evolve (C.evolve (C.linexpr c1) (C.linexpr nc))
-				) cs;
-				evolve_all l (c :: cs);
-				evolve_all r (nc :: cs)
-		in
-    let nls1 = if !evolve then 
-      begin
-       evolve_all t1 [];
-       LMap.fold (fun (c,nc) count ls ->
-         if count >= !evolvethr then
-           LSet.add (if C.isLeq nc c then (c, nc) else (nc, c)) ls
-         else
-           ls
-         ) !evolve_map ls1
-     end else ls1 in
-    let ls = if !evolve then LSet.diff ls2 nls1 else LSet.diff ls2 ls1 in
-    let allowed =    (LMap.filter (fun _ n -> n >= !evolvethr) !evolve_map)in
-    let replace = ref LMap.empty in
-    let _ = LSet.iter (fun (c2,nc2)  ->  try (LMap.iter (fun (c,nc) m -> match LMap.find_opt (c2,c) allowed  with None -> () | Some v -> replace := LMap.add  (c2,nc2)   (c,nc) !replace; raise Exit ) allowed) with Exit -> () ) ls  in
- 
-    (* let _ = 
-      begin
-      ignore(Format.printf "Evolved constraint %d\n" ((LSet.cardinal nls1) - (LSet.cardinal ls1)));
-      ignore(Format.printf "Replace set %d\n" ((LMap.cardinal !replace)));
-      ignore(Format.printf "Allowed set %d\n" ((LMap.cardinal allowed)));
-      ignore(LMap.iter (fun (c,nc) n -> Format.printf "label ("; Lincons1.print Format.std_formatter c; Format.printf ","; Lincons1.print Format.std_formatter nc; Format.printf " : %d \n" n) allowed);
-      
-      ignore(Format.printf "Evolve map %d\n" ((LMap.cardinal  !evolve_map)));
-      ignore(LMap.iter (fun (c,nc) n -> Format.printf "label ("; Lincons1.print Format.std_formatter c; Format.printf ","; Lincons1.print Format.std_formatter nc; Format.printf " : %d \n" n) !evolve_map)
-      end
-      
-    in   *)
-    
+    let module LMap = Map.Make (L) in
+    let count_add k m = CMap.add k (1 + Option.value ~default:0 (CMap.find_opt k m)) m in
+    (* canonical (sum c_i x_i > e), e in {0, 1}, c = evolve (a, b): as
+       FuncTion's constraints [sum c_i x_i + k >= 0], the constraints
+       [c . x >= 0] and [c . x >= 1] *)
+    let evolved a b =
+      let e = C.canonical (C.evolve (C.linexpr a) (C.linexpr b)) in
+      List.map (fun k ->
+          let c = Lincons1.make (Linexpr1.copy e) Lincons1.SUPEQ in
+          Lincons1.set_cst c (Coeff.s_of_int k);
+          c) [ 0; -1 ]
+    in
+    (* adjacent(t): for every node (c, nc) and every constraint c' in its
+       subtrees (both polarities of each node below it), the pairs
+       (c, c'), (c', c), (nc, c'), (c', nc) -- a multiset *)
+    let adjacent t =
+      (* [ancs]: the node's ancestors, nearest first, at most
+         [!evolvedepth] of them ([0]: all of them) *)
+      let keep ancs =
+        if !evolvedepth <= 0 then ancs else List.filteri (fun i _ -> i < !evolvedepth) ancs in
+      let rec aux t ancs acc = match t with
+        | Bot | Leaf _ -> acc
+        | Node ((c, nc), l, r) ->
+          let acc = List.fold_left (fun acc (a, na) ->
+              List.fold_left (fun acc c' ->
+                  (a, c') :: (c', a) :: (na, c') :: (c', na) :: acc) acc [ c; nc ]) acc ancs in
+          let ancs = keep ((c, nc) :: ancs) in
+          aux l ancs (aux r ancs acc)
+      in
+      aux t [] []
+    in
+    (* allowed(t1) = constraints(t1) U { c in P | |P|_c >= p }, with
+       P = { canonical (evolve (a, b)) > e | (a, b) in adjacent(t1) } *)
+    let allowed =
+      if not !evolve then CMap.empty
+      else
+        let p = List.fold_left (fun m (a, b) ->
+            List.fold_left (fun m c -> count_add c m) m (evolved a b)) CMap.empty (adjacent t1) in
+        let from_t1 = LSet.fold (fun (c, nc) m -> CMap.add c max_int (CMap.add nc max_int m)) ls1 CMap.empty in
+        CMap.union (fun _ a _ -> Some a) from_t1 (CMap.filter (fun _ n -> n >= !evolvethr) p)
+    in
+    let is_allowed (c, nc) = CMap.mem c allowed || CMap.mem nc allowed in
+    (* X = constraints(t2) \ allowed(t1): the labels to remove *)
+    let ls = if !evolve then LSet.filter (fun l -> not (LSet.mem l ls1 || is_allowed l)) ls2 else LSet.diff ls2 ls1 in
+    (* replace(t1, t2) = c2 in X |-> { c in allowed(t1) | |P'|_(c2, c) >= p },
+       with P' = { (a, canonical (evolve (a, b)) > e) | (a, b) in adjacent(t2) }:
+       the allowed constraints that the removed one evolves into *)
+    let replace =
+      if not !evolve then LMap.empty
+      else
+        (* |P'|, indexed by the source constraint [a] *)
+        let p' = List.fold_left (fun m (a, b) ->
+            let counts = Option.value ~default:CMap.empty (CMap.find_opt a m) in
+            CMap.add a (List.fold_left (fun cm c -> count_add c cm) counts (evolved a b)) m)
+            CMap.empty (adjacent t2) in
+        (* the image of [a]: the allowed constraints it evolves into at
+           least [p] times, with their counts *)
+        let image_of a img =
+          match CMap.find_opt a p' with
+          | None -> img
+          | Some counts ->
+            CMap.fold (fun c n img ->
+                if n >= !evolvethr && CMap.mem c allowed then
+                  let l = make_label c in
+                  let n0 = Option.value ~default:0 (LMap.find_opt l img) in
+                  LMap.add l (Stdlib.max n n0) img
+                else img)
+              counts img
+        in
+        (* directions: a label's constraint without its constant, up to
+           sign; ranked by count, then by the number of variables (more
+           first: closest to the removed constraint) *)
+        let nvars (c, _) = let n = ref 0 in Linexpr1.iter (fun co _ -> if not (Coeff.is_zero co) then incr n) (C.linexpr c); !n in
+        let dir (c, nc) =
+          let e = Linexpr1.copy (C.linexpr c) in Linexpr1.set_cst e (Coeff.s_of_int 0);
+          let ne = Linexpr1.copy (C.linexpr nc) in Linexpr1.set_cst ne (Coeff.s_of_int 0);
+          let a = Lincons1.make e Lincons1.SUPEQ and b = Lincons1.make ne Lincons1.SUPEQ in
+          if C.isLeq a b then a else b
+        in
+        (* direction |-> (count, a label of it), over [imgs] *)
+        let dirs imgs = List.fold_left (fun m img -> LMap.fold (fun l n m ->
+            let d = dir l in
+            let n0, l0 = Option.value ~default:(0, l) (CMap.find_opt d m) in
+            CMap.add d (n0 + n, l0) m) img m) CMap.empty imgs in
+        let ranked m = List.map fst (List.stable_sort (fun (_, (n1, l1)) (_, (n2, l2)) ->
+            if n1 <> n2 then compare n2 n1 else compare (nvars l2) (nvars l1)) (CMap.bindings m)) in
+        let first k l = if k <= 0 then l else List.filteri (fun i _ -> i < k) l in
+        let images = LSet.fold (fun (c2, nc2) m ->
+            let image = LMap.remove (c2, nc2) (image_of c2 (image_of nc2 LMap.empty)) in
+            if LMap.is_empty image then m else LMap.add (c2, nc2) image m) ls LMap.empty in
+        (* at most [!evolvemax] new directions per widening, over all the
+           images ([0]: all of them) *)
+        let chosen = first !evolvemax (ranked (dirs (List.map snd (LMap.bindings images)))) in
+        let chosen = List.fold_left (fun s d -> CMap.add d () s) CMap.empty chosen in
+        (* each image restricted to the chosen directions, both constants
+           of each *)
+        let top img = LMap.fold (fun l _ acc -> if CMap.mem (dir l) chosen then l :: acc else acc) img [] in
+        let r = LMap.filter_map (fun _ img -> match top img with [] -> None | l -> Some l) images in
+        if !tracebwd then begin
+          Format.fprintf Format.std_formatter "EVOLVE: %d removed, %d replaced@." (LSet.cardinal ls) (LMap.cardinal r);
+          LMap.iter (fun (c2, _) img ->
+              Format.fprintf Format.std_formatter "  %a  ->" (C.print vars) c2;
+              List.iter (fun (c, _) -> Format.fprintf Format.std_formatter "  %a;" (C.print vars) c) img;
+              Format.fprintf Format.std_formatter "@.") r
+        end;
+        r
+    in
+
     (* Checks whether constraint c is redundant, given the constraints cs *)
     let is_redundant c cs =
       let bcs = B.inner env vars cs in
@@ -774,7 +844,7 @@ struct
         | _, _ -> Node ((c, nc), l, r)
     in
     (* Sort the tree completely; adding the new nodes *)
-    let rec rebalance_tree t cs =
+    let rec rebalance_tree replace t cs =
       match t with
       | Bot | Leaf _ -> t
       | Node ((c, nc), l, r) ->
@@ -789,10 +859,10 @@ struct
 						let rr = add_list t cls (nc :: cs) in
 						make_node (c, nc) (ll, rr) cs
 				in
-				let ll = rebalance_tree l (c :: cs) in
-				let rr = rebalance_tree r (nc :: cs) in
+				let ll = rebalance_tree replace l (c :: cs) in
+				let rr = rebalance_tree replace r (nc :: cs) in
 				let nt = make_node (c, nc) (ll, rr) cs in
-				let to_add = try [LMap.find (c, nc) !replace] with Not_found -> [] in
+				let to_add = try LMap.find (c, nc) replace with Not_found -> [] in
 				add_list nt to_add cs
     in
     (* Collapse all leaves of t into a single one, making sure
@@ -845,7 +915,22 @@ struct
           add_node (c2, nc2) (lunify t1 l2 (c2 :: cs), lunify t1 r2 (nc2 :: cs)) cs
         )
     in
-    let t2 = lunify t1 (remove_redundant (rebalance_tree t2 []) []) [] in
+    let unify replace = lunify t1 (remove_redundant (rebalance_tree replace t2 []) []) [] in
+    let t2 =
+      if LMap.is_empty replace then unify replace
+      else
+        (* the evolved cuts are kept only if they add at most
+           [!evolvegrowth] nodes to the tree ([0]: always kept): a cut is
+           copied into every branch below it, and the trees would
+           otherwise grow at every widening.  Without them, this is the
+           original left unification *)
+        let rec size = function Bot | Leaf _ -> 0 | Node (_, l, r) -> 1 + size l + size r in
+        let with_cuts = unify replace in
+        if !evolvegrowth <= 0 then with_cuts
+        else
+          let without = unify LMap.empty in
+          if size with_cuts <= size without + !evolvegrowth then with_cuts else without
+    in
     (* TODO: domain widening *)
 
     (* let t2 = left_unification t2 [] in *)
